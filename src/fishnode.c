@@ -125,7 +125,7 @@ void my_arp_received(void *l2frame)
 
 void my_send_arp_request(fnaddr_t l3addr)
 {
-   void* l2frame = malloc(0x1f);
+   void* l2frame = malloc(sizeof(struct l2header) + sizeof(struct arpheader));
    struct l2header* l2head = l2frame;
    l2head -> dest = ALL_L2_NEIGHBORS;
    l2head -> src = fish_getl2address();
@@ -136,19 +136,17 @@ void my_send_arp_request(fnaddr_t l3addr)
    arphead -> queried_addr = l3addr;
    arphead -> type = REQUEST;
    memset(&arphead -> l2_addr,0,6);
-   l2head -> checksum = in_cksum(l2frame,0x1f);
+   l2head -> checksum = in_cksum(sizeof(struct l2header) + sizeof(struct arpheader));
    fish_l1_send(l2frame);
 }
 
 void my_add_arp_entry(fn_l2addr_t l2addr, fnaddr_t addr, int timeout)
 {
-   char* l2addr_char = fnl2_ntoa(l2addr);
-   char* fn_ntoa = (addr);
    time_t l_time;
    struct arp_entry* entry = find_arp_entry(addr);
    if (entry != NULL) {
       entry -> l2 = l2addr;
-      entry -> state = 1; //resolved
+      entry -> state = RESOLVED;
       entry -> expire = time(NULL) + 180;
    }
 }
