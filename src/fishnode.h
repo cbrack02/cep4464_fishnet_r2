@@ -5,6 +5,12 @@
 #ifndef FISHNODE_FISHNODE_H
 #define FISHNODE_FISHNODE_H
 #include "fish.h"
+#define EXPIRE_TIME 180
+void my_send_arp_response(fn_l2addr_t l2addr, fnaddr_t l3addr);
+void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param);
+void my_fish_l2_send_cb(fn_l2addr_t l2addr, void* l2frame);
+struct arp_entry* find_arp_entry(fnaddr_t addr);
+void arp_invalidate_entry(void* entry);
 enum l2_protocol:uint8_t {
     FISHNET = 1,
     ARP = 2,
@@ -27,10 +33,17 @@ struct __attribute__((packed))l2header {
     uint16_t length;
     enum l2_protocol proto;
 };
+struct __attribute__((packed))fishheader{
+    uint8_t ttl;
+    uint8_t proto;
+    uint32_t packet_id;
+    fnaddr_t src;
+    fnaddr_t dest;
+};
 struct __attribute__((packed))arpheader {
     enum arp_type type;
-    uint32_t queried_addr;
-    fn_l2addr_t l2_addr;
+    fnaddr_t queried_l3;
+    fn_l2addr_t l2;
 };
 typedef struct arp_entry {
     fn_l2addr_t l2;
@@ -40,6 +53,11 @@ typedef struct arp_entry {
     arp_resolution_cb* cb;
     intptr_t param;
     struct arp_entry *next;
+    event monitor;
 }arp_entry_t;
+typedef struct arp_cb {
+    struct l2header* l2;
+    fnaddr_t l3;
+}arp_cb_t;
 #define L2_HEADER_LEN 0X11
 #endif //FISHNODE_FISHNODE_H

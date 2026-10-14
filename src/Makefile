@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -g -Wall -Werror -std=c2x
+CFLAGS = -g -Wall -Werror -std=gnu2x
 
 OS = $(shell uname -s)
 PROC = $(shell uname -p)
@@ -25,7 +25,7 @@ OSDEF = -DLINUX
 endif
 
 # Build our L2/ARP and L3 packet handling; retain built-in routing tables.
-IMPL_FLAGS ?= -DL2_IMPL -DL3_IMPL
+IMPL_FLAGS ?= -DL2_IMPL
 LIBFISH ?= $(if $(wildcard libfish-$(EXEC_SUFFIX).a),libfish-$(EXEC_SUFFIX).a,libfish.a)
 
 # fishtest_run() selects ONE registered name per invocation, not a suite.
@@ -49,9 +49,9 @@ TEST_ADDR ?= 1
 .PHONY: all test test-l2 test-l3 clean
 all: $(TARGET)
 
-$(TARGET): fishnode.c fish.h fishnode.h $(LIBFISH) Makefile
+$(TARGET): fishnode.c fish.h fishnode.h smartalloc.c smartalloc.h $(LIBFISH) Makefile
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OSINC) $(OSDEF) $(IMPL_FLAGS) \
-		$(LDFLAGS) -o $@ fishnode.c $(LIBFISH) $(OSLIB) $(LDLIBS)
+		$(LDFLAGS)-I src -o $@ smartalloc.c fishnode.c $(LIBFISH) $(OSLIB) $(LDLIBS)
 
 # FAILED is printed even when fishnode exits successfully. Require an explicit
 # PASSED line, reject FAILED lines, and also check the process exit status.

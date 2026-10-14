@@ -3,7 +3,9 @@
 #include <assert.h>
 #include <signal.h>
 #include <string.h>
-
+#include <time.h>
+#include <stdint.h>
+#include "smartalloc.h"
 #define DEBUG
 static int noprompt = 0;
 
@@ -65,39 +67,57 @@ static void keyboard_callback(char *line)
 
 // Prototypes for program 2.  Taken directly from fish.h header file
 #ifdef L2_IMPL
-arp_entry_t arp_cache = NULL;
+arp_entry_t *arp_cache = NULL;
 int my_fish_l2_send(void *l3frame, fnaddr_t next_hop, int len, uint8_t l2_proto)
 {
    void* l2frame = malloc(MTU);
-   struct l2header* frame_header = l2frame;
-   frame_header -> src = fish_getaddress();
-   void* l3frame_new = (uint8_t*)l2frame + sizeof(struct l2header);
-   memcpy(l3frame_new,l3frame,len);
-   frame_header -> checksum = in_cksum(l2frame,)
+   struct l2header* l2head = l2frame;
+   struct arp_cb* cb_data = malloc(sizeof(struct arp_cb));
+   cb_data -> l2 = l2head;
+   cb_data -> l3 = next_hop;
+   l2head -> src = fish_getl2address();
+   l2head -> proto = l2_proto;
+   l2head -> length = htons(len + sizeof(struct l2header));
+   void* l3frame_cpy = (uint8_t*)l2frame + sizeof(struct l2header);
+   memcpy(l3frame_cpy,l3frame,len);
+   memset(&l2head -> checksum, 0, 2);
+   fish_arp.resolve_fnaddr(next_hop,&my_fish_l2_send_cb,cb_data);
    return 0;
+}
+
+void my_fish_l2_send_cb(fn_l2addr_t l2addr, void* cb_param)
+{
+   struct arp_cb* cb_struct = cb_param;
+   struct l2header* l2head = cb_struct -> l2;
+   if (cb_struct -> l3 == ALL_NEIGHBORS) {
+
+   }
+   l2head -> dest = l2addr;
+   l2head -> checksum = in_cksum(l2head,htons(l2head -> length));
+   fish_l1_send(cb_struct -> l2);
+   free(cb_struct -> l2);
+   free(cb_struct);
 }
 
 int my_fishnode_l2_receive(void *l2frame)
 {
-   fn_l2addr_t *dest = l2frame;
-   fn_l2addr_t *src = (uint8_t*)l2frame + 6;
-   uint16_t* checksum = (uint8_t*)l2frame + 12;
-   uint16_t* length = (uint8_t*)l2frame + 14;
-   enum l3_protocol proto =  (uint8_t*)l2frame + 15;
-   uint16_t checksum_calc = in_cksum(l2frame,length);
-   fnaddr_t my_addr = fish_getaddress();
-   if (checksum_calc != checksum) {
+   struct l2header* l2head = l2frame;
+   uint16_t checksum_calc = in_cksum(l2frame,ntohs(l2head -> length));
+   fn_l2addr_t my_addr = fish_getl2address();
+   if (checksum_calc != 0) {
       //invalid checksum, drop packet.
       return 0;
    }
-   if (FNL2_EQ(dest,my_addr) || FNL2_EQ(dest,ALL_L2_NEIGHBORS)) {
+   if (!FNL2_EQ(l2head -> dest,my_addr) && !(FNL2_EQ(l2head -> dest,ALL_L2_NEIGHBORS))) {
       //data is not for me, drop packet.
       return 0;
    }
-   switch(l3_protocol){
+   void* l3frame = (uint8_t*)l2frame + sizeof(struct l2header);
+   switch(l2head -> proto){
       case FISHNET:
          break;
       case ARP:
+         (*fish_arp.arp_received)(l2frame);
          break;
       case NEIGHBOR:
          break;
@@ -105,22 +125,24 @@ int my_fishnode_l2_receive(void *l2frame)
          break;
       default:
    }
+   (*fish_l3.fish_l3_receive)(l3frame,ntohs(l2head -> length) - sizeof(struct l2header),l2head -> proto);
    return 0;
 }
 
 void my_arp_received(void *l2frame)
 {
-   struct l2header* l2header = l2frame;
-   struct arpheader* arpheader =  (uint8_t*)l2frame + sizeof(struct l2header);
-   switch(arpheader -> type) {
+   struct l2header* l2head = l2frame;
+   struct arpheader* arphead = (struct arpheader*)((uint8_t*) l2frame + sizeof(struct l2header));
+   switch(ntohl(arphead -> type)) {
       case REQUEST:
-
+         my_send_arp_response(l2head -> src, arphead -> queried_l3);
          break;
       case RESPONSE:
-
+         (*fish_arp.add_arp_entry)(arphead -> l2, arphead -> queried_l3,EXPIRE_TIME);
          break;
       default:
    }
+
 }
 
 void my_send_arp_request(fnaddr_t l3addr)
@@ -132,31 +154,65 @@ void my_send_arp_request(fnaddr_t l3addr)
    l2head -> proto = ARP;
    l2head -> checksum = 0;
    l2head -> length = htons(0x1f);
-   struct arpheader* arphead = (uint8_t*) l2frame + (sizeof(struct l2header));
-   arphead -> queried_addr = l3addr;
-   arphead -> type = REQUEST;
-   memset(&arphead -> l2_addr,0,6);
-   l2head -> checksum = in_cksum(sizeof(struct l2header) + sizeof(struct arpheader));
+   struct arpheader* arphead = (struct arpheader*)((uint8_t*) l2frame + sizeof(struct l2header));
+   arphead -> queried_l3 = l3addr;
+   arphead -> type = htonl(REQUEST);
+   memset(&arphead -> l2,0,6);
+   l2head -> checksum = in_cksum(l2head,sizeof(struct l2header) + sizeof(struct arpheader));
    fish_l1_send(l2frame);
+   free(l2frame);
+}
+
+void my_send_arp_response(fn_l2addr_t l2addr, fnaddr_t l3addr)
+{
+   void* l2frame = malloc(sizeof(struct l2header) + sizeof(struct arpheader));
+   struct l2header* l2head = l2frame;
+   l2head -> dest = l2addr;
+   l2head -> src = fish_getl2address();
+   l2head -> proto = ARP;
+   l2head -> checksum = 0;
+   l2head -> length = htons(sizeof(struct l2header) + sizeof(struct arpheader));
+   struct arpheader* arphead = (struct arpheader*)((uint8_t*) l2frame + sizeof(struct l2header));
+   arphead -> queried_l3 = l3addr;
+   arphead -> type = htonl(RESPONSE);
+   arphead -> l2 = fish_getl2address();
+   l2head -> checksum = in_cksum(l2head,sizeof(struct l2header) + sizeof(struct arpheader));
+   fish_l1_send(l2frame);
+   free(l2frame);
 }
 
 void my_add_arp_entry(fn_l2addr_t l2addr, fnaddr_t addr, int timeout)
 {
-   time_t l_time;
    struct arp_entry* entry = find_arp_entry(addr);
    if (entry != NULL) {
-      entry -> l2 = l2addr;
-      entry -> state = RESOLVED;
-      entry -> expire = time(NULL) + 180;
+      if (entry -> monitor != 0) {
+         fish_cancelevent(entry -> monitor);
+      }
+      (*entry -> cb)(l2addr,(void*)entry -> param);
    }
+   else {
+      entry = malloc(sizeof(struct arp_entry));
+   }
+   entry -> l2 = l2addr;
+   entry -> state = RESOLVED;
+   entry -> expire = timeout;
+   entry -> monitor = fish_scheduleevent(timeout*1000,arp_invalidate_entry,entry);
 }
 
-void new_arp_node() {
-
+void arp_invalidate_entry(void* param)
+{
+   struct arp_entry* entry = param;
+   struct arp_entry* prev = find_arp_entry(entry -> l3);
+   prev -> next = entry -> next;
+   if (entry -> monitor != 0) {
+      fish_cancelevent(entry -> monitor);
+   }
+   free(entry);
 }
+
 struct arp_entry* find_arp_entry(fnaddr_t addr) {
    struct arp_entry* curr = arp_cache;
-   while (curr != NULL && curr -> ) {
+   while (curr != NULL && curr -> l3 != addr) {
       curr = curr -> next;
    }
    return curr;
@@ -164,10 +220,17 @@ struct arp_entry* find_arp_entry(fnaddr_t addr) {
 
 void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param)
 {
-   //if we find address in arp cache, then we call cb immediately.
+   if (addr == htonl(ALL_NEIGHBORS)) {
+      (*cb)(ALL_L2_NEIGHBORS,param);
+   }
+   struct arp_entry* entry = find_arp_entry(addr);
+   if (entry == NULL || entry -> state != RESOLVED) {
+      entry = malloc(sizeof(struct arp_entry));
+      entry -> l3 = addr;
+   }
+   
    //if we can't find address, initiate arp lookup (my_send_arp_request with broadcast) and make a new arp node
-   if ()
-   cb(addr,param);
+   (*fish_arp.send_arp_request)(addr);
 }
 #endif
 
