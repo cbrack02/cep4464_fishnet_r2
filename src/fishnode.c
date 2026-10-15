@@ -72,31 +72,23 @@ int my_fish_l2_send(void *l3frame, fnaddr_t next_hop, int len, uint8_t l2_proto)
 {
    void* l2frame = malloc(MTU);
    struct l2header* l2head = l2frame;
-   struct arp_cb* cb_data = malloc(sizeof(struct arp_cb));
-   cb_data -> l2 = l2head;
-   cb_data -> l3 = next_hop;
    l2head -> src = fish_getl2address();
    l2head -> proto = l2_proto;
    l2head -> length = htons(len + sizeof(struct l2header));
    void* l3frame_cpy = (uint8_t*)l2frame + sizeof(struct l2header);
    memcpy(l3frame_cpy,l3frame,len);
    memset(&l2head -> checksum, 0, 2);
-   fish_arp.resolve_fnaddr(next_hop,&my_fish_l2_send_cb,cb_data);
+   fish_arp.resolve_fnaddr(next_hop,&my_arp_cb,l2head);
    return 0;
 }
 
-void my_fish_l2_send_cb(fn_l2addr_t l2addr, void* cb_param)
+void my_arp_cb(fn_l2addr_t l2addr, void* frame)
 {
-   struct arp_cb* cb_struct = cb_param;
-   struct l2header* l2head = cb_struct -> l2;
-   if (cb_struct -> l3 == ALL_NEIGHBORS) {
-
-   }
+   struct l2header* l2head = frame;
    l2head -> dest = l2addr;
    l2head -> checksum = in_cksum(l2head,htons(l2head -> length));
-   fish_l1_send(cb_struct -> l2);
-   free(cb_struct -> l2);
-   free(cb_struct);
+   fish_l1_send(frame);
+   free(l2head);
 }
 
 int my_fishnode_l2_receive(void *l2frame)
@@ -184,25 +176,39 @@ void my_send_arp_response(fn_l2addr_t l2addr, fnaddr_t l3addr)
 void my_add_arp_entry(fn_l2addr_t l2addr, fnaddr_t addr, int timeout)
 {
    struct arp_entry* entry = find_arp_entry(addr);
+   struct arp_cb* callback;
    if (entry != NULL) {
+      entry -> state = RESOLVED;
+      entry -> expire = timeout + time(NULL);
       if (entry -> monitor != 0) {
          fish_cancelevent(entry -> monitor);
       }
-      (*entry -> cb)(l2addr,(void*)entry -> param);
+      entry -> monitor = 0;
+      while (entry ->cb != NULL) {
+         callback = entry -> cb;
+         entry -> cb = callback -> next;
+         (*callback -> cb)(l2addr,callback -> packet);
+      }
    }
-   else {
-      entry = malloc(sizeof(struct arp_entry));
+
+   struct arp_entry* curr = arp_cache;
+   while (curr != NULL) {
+      curr = curr -> next;
    }
-   entry -> l2 = l2addr;
-   entry -> state = RESOLVED;
-   entry -> expire = timeout;
-   entry -> monitor = fish_scheduleevent(timeout*1000,arp_invalidate_entry,entry);
+   if (curr == NULL) {
+      curr = entry;
+      return;
+   }
+   curr -> next = entry;
 }
 
 void arp_invalidate_entry(void* param)
 {
    struct arp_entry* entry = param;
    struct arp_entry* prev = find_arp_entry(entry -> l3);
+   if (prev == NULL) {
+      free(prev);
+   }
    prev -> next = entry -> next;
    if (entry -> monitor != 0) {
       fish_cancelevent(entry -> monitor);
@@ -218,19 +224,43 @@ struct arp_entry* find_arp_entry(fnaddr_t addr) {
    return curr;
 }
 
+void arp_process(struct arp_entry* entry) {
+   if (entry != NULL && entry -> state == 0) {
+      entry -> state = DOWN;
+         (*fish_arp.send_arp_request)(entry -> l3);
+   }
+}
+
 void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param)
 {
+   struct arp_cb* cb_data;
    if (addr == htonl(ALL_NEIGHBORS)) {
       (*cb)(ALL_L2_NEIGHBORS,param);
    }
-   struct arp_entry* entry = find_arp_entry(addr);
-   if (entry == NULL || entry -> state != RESOLVED) {
-      entry = malloc(sizeof(struct arp_entry));
-      entry -> l3 = addr;
+   else {
+      struct arp_entry* entry = find_arp_entry(addr);
+      if (entry == NULL || entry -> state != RESOLVED) {
+         if (entry == NULL) {
+            entry = malloc(sizeof(struct arp_entry));
+            memset(entry, 0, sizeof(struct arp_entry));
+            entry -> next = arp_cache;
+            arp_cache = entry;
+            entry -> l3 = addr;
+         }
+         cb_data = malloc(sizeof(struct arp_cb));
+         cb_data -> cb = cb;
+         cb_data -> packet = param;
+         cb_data -> next = entry -> cb;
+         if (cb_data -> next == NULL) {
+            arp_process(entry);
+         }
+      }
+      else {
+         (*cb)(entry->l2,param);
+      }
    }
    
    //if we can't find address, initiate arp lookup (my_send_arp_request with broadcast) and make a new arp node
-   (*fish_arp.send_arp_request)(addr);
 }
 #endif
 
