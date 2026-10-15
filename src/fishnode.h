@@ -51,7 +51,7 @@ typedef struct arp_entry {
     time_t expire;
     enum arp_state state;
     struct arp_cb* cb;
-    intptr_t param;
+    void* param;
     struct arp_entry *next;
     event monitor;
 }arp_entry_t;

@@ -127,6 +127,7 @@ void my_arp_received(void *l2frame)
    struct arpheader* arphead = (struct arpheader*)((uint8_t*) l2frame + sizeof(struct l2header));
    switch(ntohl(arphead -> type)) {
       case REQUEST:
+         (*fish_arp.add_arp_entry)(arphead -> l2, arphead -> queried_l3,EXPIRE_TIME);
          my_send_arp_response(l2head -> src, arphead -> queried_l3);
          break;
       case RESPONSE:
@@ -175,31 +176,24 @@ void my_send_arp_response(fn_l2addr_t l2addr, fnaddr_t l3addr)
 
 void my_add_arp_entry(fn_l2addr_t l2addr, fnaddr_t addr, int timeout)
 {
+   fish_debug(5,"adding ARP entry %s->%s\n",fnl2_ntoa(l2addr),fn_ntoa(addr));
    struct arp_entry* entry = find_arp_entry(addr);
    struct arp_cb* callback;
-   if (entry != NULL) {
-      entry -> state = RESOLVED;
-      entry -> expire = timeout + time(NULL);
-      if (entry -> monitor != 0) {
-         fish_cancelevent(entry -> monitor);
-      }
-      entry -> monitor = 0;
-      while (entry ->cb != NULL) {
-         callback = entry -> cb;
-         entry -> cb = callback -> next;
-         (*callback -> cb)(l2addr,callback -> packet);
-      }
-   }
-
-   struct arp_entry* curr = arp_cache;
-   while (curr != NULL) {
-      curr = curr -> next;
-   }
-   if (curr == NULL) {
-      curr = entry;
+   if (entry == NULL) {
       return;
    }
-   curr -> next = entry;
+   entry -> l2 = l2addr;
+   entry -> state = RESOLVED;
+   entry -> expire = timeout + time(NULL);
+   if (entry -> monitor != 0) {
+      fish_cancelevent(entry -> monitor);
+   }
+   entry -> monitor = 0;
+   while (entry ->cb != NULL) {
+      callback = entry -> cb;
+      entry -> cb = callback -> next;
+      (*callback -> cb)(entry -> l2,callback -> packet);
+   }
 }
 
 void arp_invalidate_entry(void* param)
@@ -225,7 +219,7 @@ struct arp_entry* find_arp_entry(fnaddr_t addr) {
 }
 
 void arp_process(struct arp_entry* entry) {
-   if (entry != NULL && entry -> state == 0) {
+   if (entry != NULL && entry -> state != RESOLVED) {
       entry -> state = DOWN;
          (*fish_arp.send_arp_request)(entry -> l3);
    }
@@ -233,6 +227,7 @@ void arp_process(struct arp_entry* entry) {
 
 void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param)
 {
+   struct ACParam* test = param;
    struct arp_cb* cb_data;
    if (addr == htonl(ALL_NEIGHBORS)) {
       (*cb)(ALL_L2_NEIGHBORS,param);
@@ -246,6 +241,9 @@ void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param)
             entry -> next = arp_cache;
             arp_cache = entry;
             entry -> l3 = addr;
+            entry -> l2 = test -> l2;
+            entry -> state = DOWN;
+            entry -> param = param;
          }
          cb_data = malloc(sizeof(struct arp_cb));
          cb_data -> cb = cb;
@@ -253,6 +251,7 @@ void my_resolve_fnaddr(fnaddr_t addr, arp_resolution_cb cb, void *param)
          cb_data -> next = entry -> cb;
          if (cb_data -> next == NULL) {
             arp_process(entry);
+            (*cb)(entry->l2,param);
          }
       }
       else {
